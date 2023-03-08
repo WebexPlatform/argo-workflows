@@ -19,7 +19,7 @@ type Claims struct {
 }
 
 type UserInfo struct {
-	Groups []string `json:"groups"`
+	Groups []string `json:"memberof"`
 }
 
 type HttpClient interface {
