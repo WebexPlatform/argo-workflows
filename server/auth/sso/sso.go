@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"strings"
 	"time"
+	"regexp"
 
 	pkgrand "github.com/argoproj/pkg/rand"
 	"github.com/coreos/go-oidc/v3/oidc"
@@ -58,6 +59,7 @@ type sso struct {
 	expiry          time.Duration
 	customClaimName string
 	userInfoPath    string
+	filterGroupsRegex []*regexp.Regexp
 }
 
 func (s *sso) IsRBACEnabled() bool {
@@ -78,6 +80,7 @@ type Config struct {
 	CustomGroupClaimName string `json:"customGroupClaimName,omitempty"`
 	UserInfoPath         string `json:"userInfoPath,omitempty"`
 	InsecureSkipVerify   bool   `json:"insecureSkipVerify,omitempty"`
+	FilterGroupsRegex    []string `json:"filterGroupsRegex,omitempty"`
 }
 
 func (c Config) GetSessionExpiry() time.Duration {
@@ -193,7 +196,20 @@ func newSso(
 	if err != nil {
 		return nil, fmt.Errorf("failed to create JWT encrpytor: %w", err)
 	}
-	lf := log.Fields{"redirectUrl": config.RedirectURL, "issuer": c.Issuer, "issuerAlias": "DISABLED", "clientId": c.ClientID, "scopes": config.Scopes, "insecureSkipVerify": c.InsecureSkipVerify}
+	var filterGroupsRegex []*regexp.Regexp
+	// hardcoded for wbx3
+	c.FilterGroupsRegex = []string{".*kubed.*|.*wbx3.*|.*meetpaas.*|.*mpe.*|.*ccatg.*|.*sdp.*|.*infra.*"}
+	if c.FilterGroupsRegex != nil && len(c.FilterGroupsRegex) > 0 {
+		for _, regex := range c.FilterGroupsRegex {
+			compiledRegex, err := regexp.Compile(regex)
+			if err != nil {
+				return nil, fmt.Errorf("failed to compile sso.filterGroupRegex: %s %w", regex, err)
+			}
+			filterGroupsRegex = append(filterGroupsRegex, compiledRegex)
+		}
+	}
+
+	lf := log.Fields{"redirectUrl": config.RedirectURL, "issuer": c.Issuer, "issuerAlias": "DISABLED", "clientId": c.ClientID, "scopes": config.Scopes, "insecureSkipVerify": c.InsecureSkipVerify, "filterGroupsRegex": c.FilterGroupsRegex}
 	if c.IssuerAlias != "" {
 		lf["issuerAlias"] = c.IssuerAlias
 	}
@@ -212,6 +228,7 @@ func newSso(
 		customClaimName: c.CustomGroupClaimName,
 		userInfoPath:    c.UserInfoPath,
 		issuer:          c.Issuer,
+		filterGroupsRegex: filterGroupsRegex,
 	}, nil
 }
 
@@ -295,6 +312,20 @@ func (s *sso) HandleCallback(w http.ResponseWriter, r *http.Request) {
 			_, _ = w.Write([]byte(fmt.Sprintf("failed to get groups claim: %v", err)))
 			return
 		}
+	}
+
+	// only return groups that match at least one of the regexes
+	if s.filterGroupsRegex != nil && len(s.filterGroupsRegex) > 0 {
+		var filteredGroups []string
+		for _, group := range groups {
+			for _, regex := range s.filterGroupsRegex {
+				if regex.MatchString(group) {
+					filteredGroups = append(filteredGroups, group)
+					break
+				}
+			}
+		}
+		groups = filteredGroups
 	}
 
 	argoClaims := &types.Claims{
